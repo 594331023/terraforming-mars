@@ -3,11 +3,13 @@ import * as http from 'http';
 import * as querystring from 'querystring';
 import {User} from './User';
 import {Database} from './database/Database';
+import {getDate, getDay} from './UserUtil';
 import {GameLoader} from './database/GameLoader';
 import {generateRandomId} from './UserUtil';
 import {Server} from './models/ServerModel';
+import {PlayerBlockModel} from './models/PlayerModel';
 
-const colorNames = ['Blue', 'Red', 'Yellow', 'Green', 'Black', 'Purple', 'You'];
+const colorNames = ['Blue', 'Red', 'Yellow', 'Green', 'Black', 'Purple', 'You', 'blue', 'red', 'yellow', 'green', 'black', 'purple', 'you'];
 
 function notFound(req: http.IncomingMessage, res: http.ServerResponse): void {
   if ( ! process.argv.includes('hide-not-found-warnings')) {
@@ -152,8 +154,8 @@ export function login(req: http.IncomingMessage, res: http.ServerResponse): void
       const userReq = JSON.parse(body);
       const userName: string = userReq.userName.trim().toLowerCase();
       const password: string = userReq.password.trim().toLowerCase();
-      if (userName === undefined || userName.length <= 1) {
-        throw new Error('UserName must not be empty and  be longer than 1');
+      if (userName === undefined || userName.length === 0) {
+        throw new Error('UserName must not be empty ');
       }
       const user = GameLoader.getInstance().userNameMap.get(userName);
       if (user === undefined) {
@@ -198,6 +200,7 @@ export function register(req: http.IncomingMessage, res: http.ServerResponse): v
       }
       Database.getInstance().saveUser(userId, userName, password, '{}');
       const user: User = new User(userName, password, userId);
+      user.createtime = getDay();
       GameLoader.getInstance().userNameMap.set(userName, user);
       GameLoader.getInstance().userIdMap.set(userId, user);
       res.setHeader('Content-Type', 'application/json');
@@ -229,7 +232,7 @@ export function isvip(req: http.IncomingMessage, res: http.ServerResponse): void
     notFound(req, res);
     return;
   }
-
+  user.accessDate = getDate();
   try {
     res.setHeader('Content-Type', 'application/json');
     if ( user.isvip()) {
@@ -267,7 +270,7 @@ export function resign(req: http.IncomingMessage, res: http.ServerResponse): voi
         notFound(req, res);
         return;
       }
-      const userPlayer = GameLoader.getInstance().userNameMap.get(player.name);
+      const userPlayer = GameLoader.getUserByPlayer(player);
       const user = GameLoader.getInstance().userIdMap.get(userId);
       if (user === undefined || !user.isvip()) {
         notFound(req, res);
@@ -279,7 +282,12 @@ export function resign(req: http.IncomingMessage, res: http.ServerResponse): voi
       }
       game.exitPlayer(player);
       res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify(Server.getPlayerModel(player, false)));
+      const playerBlockModel : PlayerBlockModel ={
+        block: false,
+        isme: true,
+        showhandcards: user.showhandcards,
+      };
+      res.end(JSON.stringify(Server.getPlayerModel(player, playerBlockModel)));
     } catch (err) {
       console.warn('error resign', err);
       console.warn('error resign:', body);
@@ -289,3 +297,103 @@ export function resign(req: http.IncomingMessage, res: http.ServerResponse): voi
     }
   });
 }
+
+export function showHand(req: http.IncomingMessage, res: http.ServerResponse): void {
+  let body = '';
+  req.on('data', function(data) {
+    body += data.toString();
+  });
+  req.once('end', function() {
+    try {
+      const userReq:any = JSON.parse(body);
+      const user = GameLoader.getInstance().userIdMap.get(userReq.userId);
+      if (user === undefined) {
+        notFound(req, res);
+        return;
+      }
+      if (userReq.showhandcards ) {
+        user.showhandcards = true;
+      } else {
+        user.showhandcards = false;
+      }
+
+      res.setHeader('Content-Type', 'application/json');
+      res.write('success');
+      res.end();
+    } catch (err) {
+      console.warn('error update', err);
+      res.writeHead(500);
+      res.write('Unable to update: ' + err.message);
+      res.end();
+    }
+  });
+}
+
+export function sitDown(req: http.IncomingMessage, res: http.ServerResponse): void {
+  let body = '';
+  req.on('data', function(data) {
+    body += data.toString();
+  });
+  req.once('end', function() {
+    try {
+      const userReq:any = JSON.parse(body);
+      const userme = GameLoader.getInstance().userIdMap.get(userReq.userId);
+      if (userme === undefined) {
+        notFound(req, res);
+        return;
+      }
+      if (userReq.playerId === undefined) {
+        notFound(req, res);
+        return;
+      }
+      GameLoader.getInstance().getByPlayerId(userReq.playerId, (game) => {
+        if (game === undefined) {
+          console.warn('sitDown game undefined');
+          notFound(req, res);
+          return;
+        }
+        const player = game.getAllPlayers().find((player) => player.id === userReq.playerId);
+        if (player === undefined || player.userId !== undefined) {
+          console.warn('sitDown player === undefined || player.userId !== undefined');
+          notFound(req, res);
+          return;
+        }
+
+        // 已经属于其他用户
+        const userThat = GameLoader.getInstance().userNameMap.get(player.name);
+        if (userThat !== undefined ) {
+          console.warn('sitDown userThat !== undefined');
+          notFound(req, res);
+          return;
+        }
+
+        let haveSit = false;
+        game.getAllPlayers().forEach( (p) => {
+          if (p !== player && ( p.userId === userme.id || p.name === userme.name)) {
+            // res.setHeader('Content-Type', 'application/json');
+            res.write('不能重复坐下，请使用你自己的游戏地址');
+            res.end();
+            haveSit = true;
+            return;
+          }
+        });
+        if (haveSit ) {
+          return;
+        }
+        player.name = userme.name;
+        player.userId = userme.id;
+        game.log('${0} sit down', (b) => b.player(player));
+        GameLoader.getInstance().add(game);
+        res.write('success');
+        res.end();
+      });
+    } catch (err) {
+      console.warn('error update', err);
+      res.writeHead(500);
+      res.write('Unable to update: ' + err.message);
+      res.end();
+    }
+  });
+}
+
+
